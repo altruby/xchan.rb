@@ -159,7 +159,7 @@ class Chan::UNIXSocket
   def recv_nonblock
     @mutex.synchronize do
       @lock.lock_nonblock
-      raise IOError, "closed channel" if closed?
+      raise IOError, "channel closed" if closed?
       stream = @r.local_address.socktype == Socket::SOCK_STREAM
       unless @partial
         if stream
@@ -292,6 +292,17 @@ class Chan::UNIXSocket
   # @return [Chan::UNIXSocket, nil]
   #  Returns self when the channel is lockable, otherwise returns nil
   def wait_lockable(timeout = nil)
+    ##
+    # `lockf(F_LOCK)` blocks in the kernel and is queued there, so there is
+    # nothing to poll for when no timeout is given: a lock held for
+    # microseconds is released with a wakeup rather than up to a tick of the
+    # loop below - which is ten milliseconds, and is paid by every waiter
+    # that finds the lock busy at the moment it looks.
+    #
+    # The loop stays for the timeout case, which has to give up rather than
+    # wait, and is the only caller that asks for one. `to_a`, `flush`,
+    # `empty?` and the stat methods call `#lock` directly and always did.
+    return @lock.lock if timeout.nil?
     start = (timeout ? gettime : nil)
     loop do
       break(nil) if start && (gettime - start) >= timeout
