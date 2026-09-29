@@ -159,7 +159,7 @@ class Chan::UNIXSocket
   def recv_nonblock
     @mutex.synchronize do
       @lock.lock_nonblock
-      raise IOError, "channel closed" if closed?
+      raise IOError, "closed channel" if closed?
       stream = @r.local_address.socktype == Socket::SOCK_STREAM
       unless @partial
         if stream
@@ -285,24 +285,35 @@ class Chan::UNIXSocket
   end
 
   ##
-  # Waits for the channel to become lockable
+  # Waits for the channel to become lockable, and takes the lock.
+  #
+  # Without a timeout the wait is `lockf(F_LOCK)`, which blocks in the
+  # kernel: the releaser wakes the waiter, so there is no interval to poll
+  # on - a lock held for microseconds is released with a wakeup rather than
+  # up to a tick of the loop below.
+  #
+  # **The caller comes back holding the lock**, which is what the retry in
+  # `send` and `recv` expects, and why the release paths are theirs. With a
+  # timeout the channel comes back as it was, because that loop gives up
+  # rather than acquires.
+  #
+  # The acquisition is no longer under `@mutex`, where it used to be - only
+  # the release is. With threads the two ends can therefore belong to
+  # different threads, which is a redundant retry at worst: `lockf` locks
+  # are held per process and give no intra-process exclusion at all, and
+  # every socket operation still happens under a successfully taken
+  # `F_TLOCK`.
+  #
   # @param [Float, Integer, nil] timeout
   #  The number of seconds to wait before timeout.
   #  Waits indefinitely with no arguments
   # @return [Chan::UNIXSocket, nil]
   #  Returns self when the channel is lockable, otherwise returns nil
   def wait_lockable(timeout = nil)
-    ##
-    # `lockf(F_LOCK)` blocks in the kernel and is queued there, so there is
-    # nothing to poll for when no timeout is given: a lock held for
-    # microseconds is released with a wakeup rather than up to a tick of the
-    # loop below - which is ten milliseconds, and is paid by every waiter
-    # that finds the lock busy at the moment it looks.
-    #
-    # The loop stays for the timeout case, which has to give up rather than
-    # wait, and is the only caller that asks for one. `to_a`, `flush`,
-    # `empty?` and the stat methods call `#lock` directly and always did.
-    return @lock.lock if timeout.nil?
+    if timeout.nil?
+      @lock.lock
+      return self
+    end
     start = (timeout ? gettime : nil)
     loop do
       break(nil) if start && (gettime - start) >= timeout
