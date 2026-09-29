@@ -227,6 +227,8 @@ end
 ##
 # Chan::UNIXSocket#wait_lockable
 class Chan::WaitLockableTest < Chan::Test
+  include Timeout
+
   def test_wait_lockable_on_lockable_channel
     assert_instance_of Chan::UNIXSocket, ch.wait_lockable
   end
@@ -237,6 +239,27 @@ class Chan::WaitLockableTest < Chan::Test
       Process.wait fork { aux.send ch.wait_lockable(0.1).class.to_s }
     end
     assert_equal "NilClass", aux.recv
+  ensure
+    aux.close
+  end
+
+  ##
+  # Without a timeout the wait is a blocking lock rather than a loop, so
+  # the answer can only arrive because the release woke the child - a lock
+  # that was never contended would answer either way, and a timeout would
+  # answer before the release at all.
+  def test_wait_lockable_without_a_timeout_on_a_locked_channel
+    aux = xchan(:pure)
+    lock! do
+      pid = fork { aux.send ch.wait_lockable.class.to_s }
+      ##
+      # Long enough that the child is inside the lock rather than between
+      # two calls, and then the release.
+      sleep 0.1
+      release!
+      Process.wait(pid)
+    end
+    assert_equal "Chan::UNIXSocket", timeout(5) { aux.recv }
   ensure
     aux.close
   end
@@ -261,4 +284,3 @@ class Chan::WaitLockableTest < Chan::Test
     ch.instance_variable_get(:@lock).release
   end
 end
-
